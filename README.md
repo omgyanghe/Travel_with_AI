@@ -36,10 +36,12 @@ Travel_with_AI/
 │   │   ├── accommodation_agent.py # 住宿推荐 Agent
 │   │   ├── dining_agent.py       # 餐饮推荐 Agent
 │   │   ├── prompt_templates.py   # 各 Agent 的 Prompt 模板
-│   │   └── agent_registry.py     # Agent 注册与调度中心
-│   ├── mcp/                      # MCP 服务集成
+│   │   ├── agent_registry.py     # Agent 注册与调度中心
+│   │   └── base_agent.py         # Agent 基类 (含 MCP 工具注入)
+│   ├── mcp/                      # MCP 服务集成 (单例模式)
 │   │   ├── __init__.py
-│   │   ├── amap_client.py        # 高德地图 MCP 客户端
+│   │   ├── amap_client.py        # 高德地图 MCP 客户端 (单例)
+│   │   ├── client_manager.py     # MCP 客户端管理器 (全局唯一实例)
 │   │   └── tools.py              # MCP 工具封装
 │   ├── services/                 # 业务服务层 (被 Agents 调用)
 │   │   ├── __init__.py
@@ -122,6 +124,40 @@ Travel_with_AI/
 3. **统一协调**: Coordinator Agent 负责任务编排，避免 Agent 之间的循环依赖
 4. **灵活扩展**: 新增功能只需添加新的 Agent 和 Service，不影响现有架构
 5. **图片服务共享**: `image_service` 作为共享服务，各 Agent 可在需要时调用获取 POI 图片
+6. **MCP 单例模式**: 所有使用高德地图的 Agent 共享同一个 MCP 客户端实例，避免多进程资源浪费和 API 速率限制问题
+
+#### 🔌 MCP 客户端共享机制
+
+为避免多个 Agent 各自创建 MCP 实例导致的资源浪费和 API 限流问题，本项目采用**单例模式**管理 MCP 客户端：
+
+```
+┌─────────────────────────────────────────────────────┐
+│           MCP Client Manager (单例)                  │
+│  - 全局唯一实例                                      │
+│  - 负责启动和管理 amap-mcp-server 进程               │
+│  - 提供统一的工具访问接口                            │
+│  - 集中控制 API 调用频率                             │
+└─────────────────────────────────────────────────────┘
+                          ↓ 注入
+┌─────────────────────────────────────────────────────┐
+│              BaseAgent (Agent 基类)                  │
+│  - 所有功能 Agent 继承此类                           │
+│  - 从 Manager 获取共享的 MCP 工具                     │
+│  - 自动注入 weather/route/poi 等工具                 │
+└─────────────────────────────────────────────────────┘
+                          ↓ 继承
+┌──────────┬──────────┬──────────┬──────────┬─────────┐
+│ Weather  │  Route   │   POI    │ Accommo- │ Dining  │
+│  Agent   │  Agent   │  Agent   │ dation   │  Agent  │
+│          │          │          │  Agent   │         │
+└──────────┴──────────┴──────────┴──────────┴─────────┘
+```
+
+**实现优势：**
+- ✅ **节省资源**: 只启动一个 amap-mcp-server 进程，减少内存和 CPU 占用
+- ✅ **避免限流**: 统一控制 API 调用频率，防止超过高德 API 速率限制
+- ✅ **易于管理**: 集中管理 MCP 连接生命周期，便于错误处理和重试
+- ✅ **依赖注入**: 通过基类自动注入工具，Agent 代码更简洁
 
 ## 📝 核心功能
 
@@ -151,29 +187,193 @@ Travel_with_AI/
 
 ## 🔧 核心实现
 
-### LangChain 使用高德地图MCP工具
+### MCP 客户端单例模式实现
 
 ```python
+# src/mcp/client_manager.py
+from typing import Optional, Dict, Any
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain.agents import create_agent
 
-async def main():
-    # 使用 uvx 启动 MCP 服务器
-    client = MultiServerMCPClient(
-        {
-            "amap": {
-                "transport": "stdio",
-                "command": "uvx",
-                "args": ["amap-mcp-server"],
-                "env": {"AMAP_MAPS_API_KEY": os.getenv("AMAP_API_KEY")}
-            }
-        }
-    )
+class MCPClientManager:
+    """MCP 客户端管理器 (单例模式)"""
+    
+    _instance: Optional['MCPClientManager'] = None
+    _client: Optional[MultiServerMCPClient] = None
+    
+    def __new__(cls) -> 'MCPClientManager':
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    async def get_client(self) -> MultiServerMCPClient:
+        """获取全局唯一的 MCP 客户端实例"""
+        if self._client is None:
+            # 只在第一次调用时创建新实例
+            self._client = MultiServerMCPClient({
+                "amap": {
+                    "transport": "stdio",
+                    "command": "uvx",
+                    "args": ["amap-mcp-server"],
+                    "env": {"AMAP_MAPS_API_KEY": os.getenv("AMAP_API_KEY")}
+                }
+            })
+            await self._client.__aenter__()
+        return self._client
+    
+    async def get_tools(self) -> Dict[str, Any]:
+        """获取所有 MCP 工具"""
+        client = await self.get_client()
+        return await client.get_tools()
+    
+    async def close(self):
+        """关闭 MCP 客户端连接"""
+        if self._client:
+            await self._client.__aexit__(None, None, None)
+            self._client = None
 
-    # 连接并获取工具
-    tools = await client.get_tools()
-
+# 全局管理器实例
+mcp_manager = MCPClientManager()
 ```
+
+### Agent 基类 (自动注入 MCP 工具)
+
+```python
+# src/agents/base_agent.py
+from langchain.agents import create_agent
+from src.mcp.client_manager import mcp_manager
+
+class BaseAgent:
+    """所有功能 Agent 的基类，自动注入共享的 MCP 工具"""
+    
+    def __init__(self, llm, system_prompt: str):
+        self.llm = llm
+        self.system_prompt = system_prompt
+        self._tools = None
+    
+    async def get_tools(self):
+        """从共享的 MCP 管理器获取工具"""
+        if self._tools is None:
+            self._tools = await mcp_manager.get_tools()
+        return self._tools
+    
+    async def create_agent(self, tools_filter=None):
+        """创建 Agent，可选择性地过滤工具"""
+        all_tools = await self.get_tools()
+        
+        # 如果提供了过滤器，只保留指定的工具
+        if tools_filter:
+            filtered_tools = [t for t in all_tools if tools_filter(t.name)]
+        else:
+            filtered_tools = all_tools
+        
+        return create_agent(
+            self.llm,
+            filtered_tools,
+            prompt=self.system_prompt
+        )
+```
+
+### 功能 Agent 示例 (WeatherAgent)
+
+```python
+# src/agents/weather_agent.py
+from .base_agent import BaseAgent
+from src.agents.prompt_templates import WEATHER_AGENT_PROMPT
+
+class WeatherAgent(BaseAgent):
+    """天气查询 Agent"""
+    
+    def __init__(self, llm):
+        super().__init__(llm, WEATHER_AGENT_PROMPT)
+    
+    async def query_weather(self, city: str):
+        """查询指定城市的天气"""
+        agent = await self.create_agent(
+            tools_filter=lambda name: name == "maps_weather"
+        )
+        return await agent.ainvoke(f"查询 {city} 的天气")
+```
+
+### Service 层使用共享工具
+
+```python
+# src/services/weather_service.py
+from src.mcp.client_manager import mcp_manager
+
+class WeatherService:
+    """天气数据服务 (被 WeatherAgent 调用)"""
+    
+    def __init__(self):
+        self._tools = None
+    
+    async def get_tools(self):
+        if self._tools is None:
+            self._tools = await mcp_manager.get_tools()
+        return self._tools
+    
+    async def get_weather(self, city: str) -> dict:
+        """获取城市天气信息"""
+        tools = await self.get_tools()
+        weather_tool = next(t for t in tools if t.name == "maps_weather")
+        result = await weather_tool.invoke({"city": city})
+        return self._parse_weather_result(result)
+```
+
+### 应用启动时的生命周期管理
+
+```python
+# src/frontend/app.py
+import asyncio
+from src.mcp.client_manager import mcp_manager
+from src.agents.agent_registry import AgentRegistry
+
+async def initialize_app():
+    """应用初始化：创建共享的 MCP 客户端和 Agents"""
+    # 预加载 MCP 客户端 (只创建一次)
+    await mcp_manager.get_client()
+    
+    # 创建 Agent 注册中心 (所有 Agent 共享同一个 MCP 实例)
+    registry = AgentRegistry()
+    await registry.initialize_all_agents()
+    
+    return registry
+
+async def shutdown_app():
+    """应用关闭：清理 MCP 连接"""
+    await mcp_manager.close()
+```
+
+### LangChain 传统方式 (每个 Agent 独立创建 MCP 实例 - ❌不推荐)
+
+```python
+# ❌ 不推荐的做法：每个 Agent 都创建独立的 MCP 客户端
+async def create_weather_agent(llm):
+    # 问题：每次调用都会启动一个新的 amap-mcp-server 进程
+    client = MultiServerMCPClient({
+        "amap": {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["amap-mcp-server"],
+            "env": {"AMAP_MAPS_API_KEY": os.getenv("AMAP_API_KEY")}
+        }
+    })
+    tools = await client.get_tools()
+    return create_agent(llm, tools, prompt="...")
+
+# 如果有 5 个 Agent，就会启动 5 个 MCP 服务器进程！
+# 导致：资源浪费、API 限流、连接管理复杂
+```
+
+### ✅ 推荐做法对比
+
+| 特性 | 传统方式 (❌) | 单例模式 (✅) |
+|------|------------|-------------|
+| MCP 进程数 | N 个 (N=Agent 数量) | 1 个 (所有 Agent 共享) |
+| 内存占用 | 高 (N × 进程开销) | 低 (单一进程) |
+| API 限流风险 | 高 (N 倍请求) | 低 (统一控制) |
+| 连接管理 | 复杂 (N 个连接) | 简单 (1 个连接) |
+| 错误处理 | 分散 | 集中 |
+| 代码复用 | 低 | 高 |
 
 ### MCP工具调用
 
