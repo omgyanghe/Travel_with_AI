@@ -24,9 +24,104 @@
 
 ```
 Travel_with_AI/
-├
-└── README.md
+├── src/                          # 源代码目录
+│   ├── __init__.py
+│   ├── agents/                   # 多 Agent 协作系统
+│   │   ├── __init__.py
+│   │   ├── coordinator.py        # 总控协调 Agent (Orchestrator)
+│   │   ├── travel_planner.py     # 旅行规划 Agent (主策划)
+│   │   ├── weather_agent.py      # 天气查询 Agent
+│   │   ├── route_agent.py        # 路线规划 Agent
+│   │   ├── poi_agent.py          # POI 搜索 Agent
+│   │   ├── accommodation_agent.py # 住宿推荐 Agent
+│   │   ├── dining_agent.py       # 餐饮推荐 Agent
+│   │   ├── prompt_templates.py   # 各 Agent 的 Prompt 模板
+│   │   └── agent_registry.py     # Agent 注册与调度中心
+│   ├── mcp/                      # MCP 服务集成
+│   │   ├── __init__.py
+│   │   ├── amap_client.py        # 高德地图 MCP 客户端
+│   │   └── tools.py              # MCP 工具封装
+│   ├── services/                 # 业务服务层 (被 Agents 调用)
+│   │   ├── __init__.py
+│   │   ├── itinerary_assembler.py # 行程组装服务 (整合各 Agent 输出)
+│   │   ├── weather_service.py    # 天气数据服务 (供 WeatherAgent 调用)
+│   │   ├── route_service.py      # 路线计算服务 (供 RouteAgent 调用)
+│   │   ├── poi_service.py        # POI 搜索服务 (供 POIAgent 调用)
+│   │   ├── accommodation_service.py # 住宿推荐服务
+│   │   ├── dining_service.py     # 餐饮推荐服务
+│   │   └── image_service.py      # 图片搜索服务 (Unsplash，供各 Agent 调用)
+│   ├── frontend/                 # Gradio 前端
+│   │   ├── __init__.py
+│   │   ├── app.py                # Gradio 应用入口
+│   │   ├── components.py         # UI 组件定义
+│   │   └── styles.py             # 样式配置
+│   ├── utils/                    # 工具函数
+│   │   ├── __init__.py
+│   │   ├── config.py             # 配置管理
+│   │   └── logger.py             # 日志配置
+│   └── models/                   # 数据模型
+│       ├── __init__.py
+│       ├── itinerary.py          # 行程数据模型
+│       ├── poi.py                # POI 数据模型
+│       ├── weather.py            # 天气数据模型
+│       └── route.py              # 路线数据模型
+├── test/                         # 测试目录
+│   ├── __init__.py
+│   ├── amap_mcp_test.py          # 高德 MCP 测试
+│   ├── llm_test.py               # LLM 连接测试
+│   └── agents/                   # Agent 协作测试
+│       ├── __init__.py
+│       ├── test_weather_agent.py
+│       ├── test_route_agent.py
+│       └── test_poi_agent.py
+├── .env.example                  # 环境变量示例
+├── .gitignore                    # Git 忽略配置
+├── requirements.txt              # Python 依赖
+├── LICENSE                       # 开源许可证
+└── README.md                     # 项目说明文档
 ```
+
+### 🤖 Agent 协作流程
+
+本项目采用**多 Agent 协作架构**，每个 Agent 职责单一、功能专注，通过总控协调 Agent 进行任务分发和结果整合：
+
+```
+用户请求
+    ↓
+[Coordinator Agent] ← 总控协调，解析用户需求，分发任务
+    ↓
+    ├─→ [Weather Agent] → 调用 weather_service → 返回天气数据
+    ├─→ [POI Agent] → 调用 poi_service → 返回景点/酒店/餐厅信息
+    ├─→ [Route Agent] → 调用 route_service → 返回路线规划
+    ├─→ [Accommodation Agent] → 调用 accommodation_service → 返回住宿推荐
+    └─→ [Dining Agent] → 调用 dining_service → 返回餐饮推荐
+    ↓
+[Travel Planner Agent] ← 汇总所有 Agent 输出，生成完整行程
+    ↓
+[itinerary_assembler] ← 格式化输出，调用 image_service 补充图片
+    ↓
+用户查看完整旅行计划
+```
+
+#### 各 Agent 职责说明
+
+| Agent | 职责 | 调用的 Service | MCP 工具 |
+|-------|------|---------------|---------|
+| **Coordinator Agent** | 总控协调，解析用户输入，分发给其他 Agent | 无 | 无 |
+| **Weather Agent** | 查询目的地天气信息 | `weather_service` | `maps_weather` |
+| **POI Agent** | 搜索景点、酒店、餐厅等 POI 信息 | `poi_service` | `maps_text_search`, `maps_around_search`, `maps_search_detail` |
+| **Route Agent** | 规划景点间、酒店到景点等路线 | `route_service` | `maps_direction_*` 系列工具 |
+| **Accommodation Agent** | 根据偏好推荐住宿 | `accommodation_service` | `maps_text_search` (搜索酒店) |
+| **Dining Agent** | 根据口味和位置推荐餐厅 | `dining_service` | `maps_text_search`, `maps_around_search` |
+| **Travel Planner Agent** | 整合所有 Agent 输出，生成结构化行程 | `itinerary_assembler` | 无 (仅协调) |
+
+#### Agent 交互特点
+
+1. **去中心化设计**: 每个 Agent 独立运行，只关注单一功能，便于维护和扩展
+2. **服务层抽象**: Agent 不直接调用 MCP 工具，而是通过 Service 层封装，提高可测试性
+3. **统一协调**: Coordinator Agent 负责任务编排，避免 Agent 之间的循环依赖
+4. **灵活扩展**: 新增功能只需添加新的 Agent 和 Service，不影响现有架构
+5. **图片服务共享**: `image_service` 作为共享服务，各 Agent 可在需要时调用获取 POI 图片
 
 ## 📝 核心功能
 
