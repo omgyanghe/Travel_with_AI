@@ -193,23 +193,48 @@ Travel_with_AI/
 
 ## 🔧 核心实现
 
-### MCP 客户端单例模式实现
+### MCP 客户端单例模式 + 并发限流
+
+高德 MCP API 的并发请求上限为 **3 个**。为避免并发超限，在 MCP 客户端管理器中通过 `asyncio.Semaphore` 实现请求限流，无需修改任何 Agent 代码。
+
+```
+┌──────────────────────────────────────────────┐
+│         MCPClientManager (单例)               │
+│  ┌──────────────────────────────────────────┐│
+│  │  asyncio.Semaphore(3)    ← 并发锁        ││
+│  │  所有 MCP 工具调用都经过此信号量，        ││
+│  │  超过 3 个并发时自动排队等待              ││
+│  └──────────────────────────────────────────┘│
+│              ↓ 限流后透传                      │
+│         amap-mcp-server                        │
+└──────────────────────────────────────────────┘
+```
 
 ```python
 # src/mcp/client_manager.py
-from typing import Optional, Dict, Any
+import asyncio
+import os
+from typing import Optional
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 class MCPClientManager:
-    """MCP 客户端管理器 (单例模式)"""
+    """MCP 客户端管理器 (单例模式 + 并发限流)"""
     
     _instance: Optional['MCPClientManager'] = None
     _client: Optional[MultiServerMCPClient] = None
+    _semaphore: Optional[asyncio.Semaphore] = None
     
     def __new__(cls) -> 'MCPClientManager':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+    
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """获取并发信号量（线程安全，单例下只创建一次）"""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(3)
+        return self._semaphore
     
     async def get_client(self) -> MultiServerMCPClient:
         """获取全局唯一的 MCP 客户端实例"""
@@ -225,10 +250,24 @@ class MCPClientManager:
             await self._client.__aenter__()
         return self._client
     
-    async def get_tools(self) -> Dict[str, Any]:
-        """获取所有 MCP 工具"""
+    async def get_tools(self):
+        """获取所有 MCP 工具（自动包装并发限流）"""
         client = await self.get_client()
-        return await client.get_tools()
+        raw_tools = await client.get_tools()
+        return self._wrap_tools_with_rate_limit(raw_tools)
+    
+    def _wrap_tools_with_rate_limit(self, tools):
+        """为每个工具的 invoke/ainvoke 包装信号量限流"""
+        for tool in tools:
+            original_ainvoke = tool.ainvoke
+            
+            async def rate_limited_ainvoke(input_data, _orig=original_ainvoke):
+                async with self.semaphore:
+                    return await _orig(input_data)
+            
+            tool.ainvoke = rate_limited_ainvoke
+        
+        return tools
     
     async def close(self):
         """关闭 MCP 客户端连接"""
@@ -236,7 +275,6 @@ class MCPClientManager:
             await self._client.__aexit__(None, None, None)
             self._client = None
 
-# 全局管理器实例
 mcp_manager = MCPClientManager()
 ```
 
