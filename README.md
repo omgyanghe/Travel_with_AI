@@ -4,7 +4,7 @@
 
 ## ✨ 功能特点
 
-- 🤖 **AI驱动的旅行规划**: 基于LangChain1.x版本框架的多Agents,智能生成详细的多日旅程
+- 🤖 **AI驱动的旅行规划**: 基于LangChain1.x版本的混合二Agent架构（Orchestrator + Researcher），智能生成详细的多日旅程
 - 🗺️ **高德地图集成**: 通过MCP协议接入高德地图服务,支持景点搜索、路线规划、天气查询
 - 🧠 **智能工具调用**: Agent自动调用高德地图MCP工具,获取实时POI、路线和天气信息
 - 🎨 **现代化前端**: gradio 实现前端构建
@@ -26,37 +26,29 @@
 Travel_with_AI/
 ├── src/                          # 源代码目录
 │   ├── __init__.py
-│   ├── agents/                   # 多 Agent 协作系统
+│   ├── agents/                   # 二Agent 协作系统
 │   │   ├── __init__.py
-│   │   ├── coordinator.py        # 总控协调 Agent (Orchestrator)
-│   │   ├── travel_planner.py     # 旅行规划 Agent (主策划)
-│   │   ├── weather_agent.py      # 天气查询 Agent
-│   │   ├── route_agent.py        # 路线规划 Agent
-│   │   ├── poi_agent.py          # POI 搜索 Agent
-│   │   ├── accommodation_agent.py # 住宿推荐 Agent
-│   │   ├── dining_agent.py       # 餐饮推荐 Agent
+│   │   ├── orchestrator.py       # 总控编排 Agent (大脑，无 MCP 工具)
+│   │   ├── researcher.py         # 信息采集 Agent (手脚，拥有全部 MCP 工具)
 │   │   ├── prompt_templates.py   # 各 Agent 的 Prompt 模板
-│   │   ├── agent_registry.py     # Agent 注册与调度中心
-│   │   └── base_agent.py         # Agent 基类 (含 MCP 工具注入)
+│   │   └── base_agent.py         # Agent 基类
 │   ├── mcp/                      # MCP 服务集成 (单例模式)
 │   │   ├── __init__.py
-│   │   ├── amap_client.py        # 高德地图 MCP 客户端 (单例)
 │   │   ├── client_manager.py     # MCP 客户端管理器 (全局唯一实例)
 │   │   └── tools.py              # MCP 工具封装
-│   ├── services/                 # 业务服务层 (被 Agents 调用)
+│   ├── services/                 # 业务服务层
 │   │   ├── __init__.py
-│   │   ├── itinerary_assembler.py # 行程组装服务 (整合各 Agent 输出)
-│   │   ├── weather_service.py    # 天气数据服务 (供 WeatherAgent 调用)
-│   │   ├── route_service.py      # 路线计算服务 (供 RouteAgent 调用)
-│   │   ├── poi_service.py        # POI 搜索服务 (供 POIAgent 调用)
-│   │   ├── accommodation_service.py # 住宿推荐服务
-│   │   ├── dining_service.py     # 餐饮推荐服务
-│   │   └── image_service.py      # 图片搜索服务 (Unsplash，供各 Agent 调用)
+│   │   ├── research_service.py   # 研究服务 (封装 Researcher Agent 的调用)
+│   │   ├── itinerary_assembler.py # 行程组装服务 (格式化输出 + Unsplash 图片)
+│   │   └── image_service.py      # 图片搜索服务 (Unsplash)
 │   ├── frontend/                 # Gradio 前端
 │   │   ├── __init__.py
 │   │   ├── app.py                # Gradio 应用入口
 │   │   ├── components.py         # UI 组件定义
 │   │   └── styles.py             # 样式配置
+│   ├── wechat/                   # 微信机器人接口
+│   │   ├── __init__.py
+│   │   └── bot.py                # WeChat Bot 消息处理
 │   ├── utils/                    # 工具函数
 │   │   ├── __init__.py
 │   │   ├── config.py             # 配置管理
@@ -85,46 +77,60 @@ Travel_with_AI/
 
 ### 🤖 Agent 协作流程
 
-本项目采用**多 Agent 协作架构**，每个 Agent 职责单一、功能专注，通过总控协调 Agent 进行任务分发和结果整合：
+本项目采用**混合模式二 Agent 架构**——Orchestrator（大脑，不管工具）+ Researcher（手脚，拥有全部工具），兼顾简洁性和扩展性：
 
 ```
-用户请求
+用户请求（Gradio / WeChat Bot 共用同一后端）
     ↓
-[Coordinator Agent] ← 总控协调，解析用户需求，分发任务
+[Orchestrator Agent] ← 总控编排，负责"思考"
+    │   无 MCP 工具，专注于策略
+    │   1. 解析用户需求（目的地、日期、偏好）
+    │   2. 拆分研究任务（分天/分城市）
+    │   3. 逐天调用 Researcher 采集数据
+    │   4. 汇总所有数据，组装最终行程
     ↓
-    ├─→ [Weather Agent] → 调用 weather_service → 返回天气数据
-    ├─→ [POI Agent] → 调用 poi_service → 返回景点/酒店/餐厅信息
-    ├─→ [Route Agent] → 调用 route_service → 返回路线规划
-    ├─→ [Accommodation Agent] → 调用 accommodation_service → 返回住宿推荐
-    └─→ [Dining Agent] → 调用 dining_service → 返回餐饮推荐
+[Research Service] ← 封装对 Researcher Agent 的调用
     ↓
-[Travel Planner Agent] ← 汇总所有 Agent 输出，生成完整行程
+[Researcher Agent] ← 信息采集，负责"执行"
+    │   拥有 ALL MCP 工具
+    │   接收具体研究任务（某天、某城市）
+    │   被 Prompt 明确引导：多工具调用、全面采集
+    │   返回结构化的研究结果
     ↓
 [itinerary_assembler] ← 格式化输出，调用 image_service 补充图片
     ↓
 用户查看完整旅行计划
 ```
 
-#### 各 Agent 职责说明
+#### 各组件职责说明
 
-| Agent | 职责 | 调用的 Service | MCP 工具 |
-|-------|------|---------------|---------|
-| **Coordinator Agent** | 总控协调，解析用户输入，分发给其他 Agent | 无 | 无 |
-| **Weather Agent** | 查询目的地天气信息 | `weather_service` | `maps_weather` |
-| **POI Agent** | 搜索景点、酒店、餐厅等 POI 信息 | `poi_service` | `maps_text_search`, `maps_around_search`, `maps_search_detail` |
-| **Route Agent** | 规划景点间、酒店到景点等路线 | `route_service` | `maps_direction_*` 系列工具 |
-| **Accommodation Agent** | 根据偏好推荐住宿 | `accommodation_service` | `maps_text_search` (搜索酒店) |
-| **Dining Agent** | 根据口味和位置推荐餐厅 | `dining_service` | `maps_text_search`, `maps_around_search` |
-| **Travel Planner Agent** | 整合所有 Agent 输出，生成结构化行程 | `itinerary_assembler` | 无 (仅协调) |
+| 组件 | 职责 | MCP 工具 |
+|------|------|---------|
+| **Orchestrator Agent** | 总控编排：解析用户输入 → 拆分研究任务 → 循环调用 Researcher → 组装输出 | 无 |
+| **Researcher Agent** | 信息采集：接收具体任务，使用全部可用 MCP 工具进行多轮搜索和数据采集 | 全部 (`maps_weather`, `maps_text_search`, `maps_around_search`, `maps_search_detail`, `maps_direction_*` 等) |
+| **Research Service** | 服务封装：封装对 Researcher Agent 的调用，提供简洁的 `research(task)` 接口 | 无 |
+| **Itinerary Assembler** | 行程组装：将研究数据格式化为 Markdown 行程，调用 Unsplash 补充景点图片 | 无 |
+| **Image Service** | 图片服务：根据 POI 名称从 Unsplash 搜索相关图片 | 无 |
+
+#### 架构设计决策：为什么从 7 Agent 精简到 2 Agent
+
+| 对比维度 | 原方案 (7 Agent) | 新方案 (2 Agent) |
+|---------|-----------------|-----------------|
+| Agent 数量 | 7 个（Coordinator + Weather + POI + Route + Accommodation + Dining + Planner） | 2 个（Orchestrator + Researcher） |
+| "单工具"问题 | 每个 Agent 只绑 1-2 个工具，天然无法多工具联动 | Researcher 拥有所有工具，Prompt 引导多工具协同 |
+| 协调复杂度 | 高（串行/并行调度 5+ 子 Agent） | 低（Orchestrator 顺序调用 Researcher） |
+| 代码冗余 | 高（每个 Agent 都要写模板类、Service 包装） | 低（只有两个核心 Agent） |
+| 信息连贯性 | 差（天气、POI、路线数据分头返回，上下文割裂） | 好（Researcher 一次性返回某天的完整研究结果） |
+| 扩展性 | 每加一个功能要加一个 Agent | 通过在 Prompt 中扩展 Researcher 的能力范围即可 |
 
 #### Agent 交互特点
 
-1. **去中心化设计**: 每个 Agent 独立运行，只关注单一功能，便于维护和扩展
-2. **服务层抽象**: Agent 不直接调用 MCP 工具，而是通过 Service 层封装，提高可测试性
-3. **统一协调**: Coordinator Agent 负责任务编排，避免 Agent 之间的循环依赖
-4. **灵活扩展**: 新增功能只需添加新的 Agent 和 Service，不影响现有架构
-5. **图片服务共享**: `image_service` 作为共享服务，各 Agent 可在需要时调用获取 POI 图片
-6. **MCP 单例模式**: 所有使用高德地图的 Agent 共享同一个 MCP 客户端实例，避免多进程资源浪费和 API 速率限制问题
+1. **混合模式**: Orchestrator（中心化控制器）+ Researcher（能力型 Worker），兼顾可控性和灵活性
+2. **职责分离**: "想"和"做"分离——Orchestrator 只管策略和编排，Researcher 只管工具调用和数据采集
+3. **顺序调用**: Orchestrator 用代码循环逐步调用 Researcher，简单直接，便于调试和错误处理
+4. **Prompt 驱动的多工具调用**: Researcher 的 system prompt 明确要求"请使用所有可用的 MCP 工具进行全面的信息采集"，解决单 Agent 只调一个工具的问题
+5. **统一后端**: 所有旅行规划逻辑封装在 Agent 层，Gradio 和 WeChat Bot 都通过相同的服务接口调用
+6. **MCP 单例模式**: Orchestrator 和 Researcher 共享同一个 MCP 客户端实例，避免多进程资源浪费和 API 速率限制问题
 
 #### 🔌 MCP 客户端共享机制
 
@@ -140,17 +146,17 @@ Travel_with_AI/
 └─────────────────────────────────────────────────────┘
                           ↓ 注入
 ┌─────────────────────────────────────────────────────┐
-│              BaseAgent (Agent 基类)                  │
-│  - 所有功能 Agent 继承此类                           │
-│  - 从 Manager 获取共享的 MCP 工具                     │
-│  - 自动注入 weather/route/poi 等工具                 │
+│           Researcher Agent                           │
+│  - 信息采集 Agent，拥有全部 MCP 工具                  │
+│  - 从 Manager 获取共享的 MCP 工具                    │
+│  - 被 Orchestrator 通过 Research Service 调用        │
 └─────────────────────────────────────────────────────┘
-                          ↓ 继承
-┌──────────┬──────────┬──────────┬──────────┬─────────┐
-│ Weather  │  Route   │   POI    │ Accommo- │ Dining  │
-│  Agent   │  Agent   │  Agent   │ dation   │  Agent  │
-│          │          │          │  Agent   │         │
-└──────────┴──────────┴──────────┴──────────┴─────────┘
+                          ↑ 调用
+┌─────────────────────────────────────────────────────┐
+│           Orchestrator Agent                         │
+│  - 总控编排 Agent，无 MCP 工具                       │
+│  - 通过 Research Service 委派研究任务                │
+└─────────────────────────────────────────────────────┘
 ```
 
 **实现优势：**
@@ -208,7 +214,6 @@ class MCPClientManager:
     async def get_client(self) -> MultiServerMCPClient:
         """获取全局唯一的 MCP 客户端实例"""
         if self._client is None:
-            # 只在第一次调用时创建新实例
             self._client = MultiServerMCPClient({
                 "amap": {
                     "transport": "stdio",
@@ -235,145 +240,155 @@ class MCPClientManager:
 mcp_manager = MCPClientManager()
 ```
 
-### Agent 基类 (自动注入 MCP 工具)
+### Researcher Agent（信息采集，拥有全部 MCP 工具）
 
 ```python
-# src/agents/base_agent.py
+# src/agents/researcher.py
 from langchain.agents import create_agent
 from src.mcp.client_manager import mcp_manager
+from src.agents.prompt_templates import RESEARCHER_SYSTEM_PROMPT
 
-class BaseAgent:
-    """所有功能 Agent 的基类，自动注入共享的 MCP 工具"""
-    
-    def __init__(self, llm, system_prompt: str):
-        self.llm = llm
-        self.system_prompt = system_prompt
-        self._tools = None
-    
-    async def get_tools(self):
-        """从共享的 MCP 管理器获取工具"""
-        if self._tools is None:
-            self._tools = await mcp_manager.get_tools()
-        return self._tools
-    
-    async def create_agent(self, tools_filter=None):
-        """创建 Agent，可选择性地过滤工具"""
-        all_tools = await self.get_tools()
-        
-        # 如果提供了过滤器，只保留指定的工具
-        if tools_filter:
-            filtered_tools = [t for t in all_tools if tools_filter(t.name)]
-        else:
-            filtered_tools = all_tools
-        
-        return create_agent(
-            self.llm,
-            filtered_tools,
-            prompt=self.system_prompt
-        )
-```
-
-### 功能 Agent 示例 (WeatherAgent)
-
-```python
-# src/agents/weather_agent.py
-from .base_agent import BaseAgent
-from src.agents.prompt_templates import WEATHER_AGENT_PROMPT
-
-class WeatherAgent(BaseAgent):
-    """天气查询 Agent"""
+class ResearcherAgent:
+    """信息采集 Agent —— 负责调用 MCP 工具进行全面数据采集"""
     
     def __init__(self, llm):
-        super().__init__(llm, WEATHER_AGENT_PROMPT)
+        self.llm = llm
+        self._tools = None
+        self._agent = None
     
-    async def query_weather(self, city: str):
-        """查询指定城市的天气"""
-        agent = await self.create_agent(
-            tools_filter=lambda name: name == "maps_weather"
+    async def _initialize(self):
+        """获取所有 MCP 工具并创建 Agent"""
+        if self._agent is None:
+            self._tools = await mcp_manager.get_tools()
+            self._agent = create_agent(
+                self.llm,
+                self._tools,
+                prompt=RESEARCHER_SYSTEM_PROMPT
+            )
+    
+    async def research(self, task: str) -> str:
+        """执行一个具体的研究任务
+        
+        Args:
+            task: 具体的研究指令，如："研究北京第1天的行程：
+                  查询天气、搜索景点、推荐酒店和餐厅、规划交通"
+        """
+        await self._initialize()
+        response = await self._agent.ainvoke(
+            {"messages": [{"role": "user", "content": task}]}
         )
-        return await agent.ainvoke(f"查询 {city} 的天气")
+        return response["messages"][-1].content
 ```
 
-### Service 层使用共享工具
+### Orchestrator Agent（总控编排，无 MCP 工具）
 
 ```python
-# src/services/weather_service.py
-from src.mcp.client_manager import mcp_manager
+# src/agents/orchestrator.py
+from src.services.research_service import ResearchService
+from src.services.itinerary_assembler import ItineraryAssembler
 
-class WeatherService:
-    """天气数据服务 (被 WeatherAgent 调用)"""
+class OrchestratorAgent:
+    """总控编排 Agent —— 负责"思考"和编排，不直接调用 MCP 工具"""
     
-    def __init__(self):
-        self._tools = None
+    def __init__(self, llm):
+        self.llm = llm
+        self.research_service = ResearchService(llm)
+        self.assembler = ItineraryAssembler()
     
-    async def get_tools(self):
-        if self._tools is None:
-            self._tools = await mcp_manager.get_tools()
-        return self._tools
+    async def plan_trip(self, user_request: dict) -> str:
+        """规划完整旅行
+        
+        Args:
+            user_request: {destination, days, preferences, ...}
+        """
+        # 1. 解析用户需求，拆分研究任务
+        tasks = self._create_research_tasks(user_request)
+        
+        # 2. 逐天调用 Researcher 采集数据
+        all_research_results = []
+        for task in tasks:
+            result = await self.research_service.research(task)
+            all_research_results.append(result)
+        
+        # 3. 组装最终行程
+        itinerary = await self.assembler.assemble(
+            user_request,
+            all_research_results
+        )
+        return itinerary
     
-    async def get_weather(self, city: str) -> dict:
-        """获取城市天气信息"""
-        tools = await self.get_tools()
-        weather_tool = next(t for t in tools if t.name == "maps_weather")
-        result = await weather_tool.invoke({"city": city})
-        return self._parse_weather_result(result)
+    def _create_research_tasks(self, user_request: dict) -> list[str]:
+        """将用户需求拆分为逐天的研究任务"""
+        destination = user_request["destination"]
+        days = user_request["days"]
+        preferences = user_request.get("preferences", "")
+        
+        tasks = []
+        for day in range(1, days + 1):
+            task = (
+                f"请为{destination}的第{day}天旅行进行全面研究，包括：\n"
+                f"1. 使用 maps_weather 查询当天天气\n"
+                f"2. 使用 maps_text_search 搜索{day == 1 and '热门' or '适合深度游的'}景点\n"
+                f"3. 使用 maps_around_search 搜索景点周边的餐厅和酒店\n"
+                f"4. 使用 maps_search_detail 获取主要景点的详细信息\n"
+                f"5. 使用 maps_direction_transit_integrated_by_address 规划公共交通路线\n"
+                f"用户偏好：{preferences}\n"
+                f"请使用所有可用的 MCP 工具进行全面深入的研究。"
+            )
+            tasks.append(task)
+        return tasks
 ```
 
-### 应用启动时的生命周期管理
+### Service 层封装
+
+```python
+# src/services/research_service.py
+from src.agents.researcher import ResearcherAgent
+
+class ResearchService:
+    """研究服务 —— 封装 Researcher Agent 的调用"""
+    
+    def __init__(self, llm):
+        self.researcher = ResearcherAgent(llm)
+    
+    async def research(self, task: str) -> str:
+        """执行研究任务"""
+        return await self.researcher.research(task)
+```
+
+### 应用初始化（统一后端入口）
 
 ```python
 # src/frontend/app.py
 import asyncio
 from src.mcp.client_manager import mcp_manager
-from src.agents.agent_registry import AgentRegistry
+from src.agents.orchestrator import OrchestratorAgent
 
 async def initialize_app():
-    """应用初始化：创建共享的 MCP 客户端和 Agents"""
-    # 预加载 MCP 客户端 (只创建一次)
+    """应用初始化：创建共享的 MCP 客户端和 Orchestrator"""
     await mcp_manager.get_client()
-    
-    # 创建 Agent 注册中心 (所有 Agent 共享同一个 MCP 实例)
-    registry = AgentRegistry()
-    await registry.initialize_all_agents()
-    
-    return registry
+    # Orchestrator 会通过 ResearchService 自动创建共享 MCP 的 Researcher
+    return OrchestratorAgent(llm)
 
 async def shutdown_app():
     """应用关闭：清理 MCP 连接"""
     await mcp_manager.close()
+
+# Gradio 和 WeChat Bot 都通过同一个 orchestrator 调用
+# 前端只需: result = await orchestrator.plan_trip(user_request)
 ```
 
-### LangChain 传统方式 (每个 Agent 独立创建 MCP 实例 - ❌不推荐)
+### 旧方案 vs 新方案对比
 
-```python
-# ❌ 不推荐的做法：每个 Agent 都创建独立的 MCP 客户端
-async def create_weather_agent(llm):
-    # 问题：每次调用都会启动一个新的 amap-mcp-server 进程
-    client = MultiServerMCPClient({
-        "amap": {
-            "transport": "stdio",
-            "command": "uvx",
-            "args": ["amap-mcp-server"],
-            "env": {"AMAP_MAPS_API_KEY": os.getenv("AMAP_API_KEY")}
-        }
-    })
-    tools = await client.get_tools()
-    return create_agent(llm, tools, prompt="...")
-
-# 如果有 5 个 Agent，就会启动 5 个 MCP 服务器进程！
-# 导致：资源浪费、API 限流、连接管理复杂
-```
-
-### ✅ 推荐做法对比
-
-| 特性 | 传统方式 (❌) | 单例模式 (✅) |
-|------|------------|-------------|
-| MCP 进程数 | N 个 (N=Agent 数量) | 1 个 (所有 Agent 共享) |
-| 内存占用 | 高 (N × 进程开销) | 低 (单一进程) |
-| API 限流风险 | 高 (N 倍请求) | 低 (统一控制) |
-| 连接管理 | 复杂 (N 个连接) | 简单 (1 个连接) |
-| 错误处理 | 分散 | 集中 |
-| 代码复用 | 低 | 高 |
+| 特性 | 旧方案：每 Agent 一个工具 (❌) | 新方案：2 Agent 混合模式 (✅) |
+|------|---------------------------|---------------------------|
+| Agent 数量 | 7 个 | 2 个 |
+| MCP 进程数 | 1 个（共享） | 1 个（共享） |
+| 多工具协同 | 天然不支持 | Prompt 引导，全量工具可用 |
+| 代码量 | 高（7 个 Agent 类 + 5 个 Service） | 低（2 个 Agent 类 + 2 个 Service） |
+| 调试难度 | 高（需追踪多个 Agent 调用链） | 低（顺序调用，日志清晰） |
+| 扩展新功能 | 需添加新 Agent | 修改 Prompt + 拆分新任务类型 |
+| 与前端集成 | 每个 Agent 独立暴露 | 统一 `orchestrator.plan_trip()` 接口 |
 
 ### MCP工具调用
 
