@@ -1,20 +1,18 @@
-.wechatbot/
-
-*.log
-*.tmp
-*.swp
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
 
 .env
-.env.local
-
-
-.vscode/
-.idea/
-
-
-node_modules/
-venv/
 .venv/
-__pycache__/
+venv/
+*.log
 
 .DS_Store
+Thumbs.db
+
+*.swp
+*.swo
+*~
